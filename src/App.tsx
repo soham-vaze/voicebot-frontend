@@ -22,6 +22,12 @@ function App() {
   const streamRef = useRef<MediaStream | null>(null);
   const isCallingRef = useRef(false);
 
+  // 🔥 NEW REFS
+  const chunkStartTimeRef = useRef<number | null>(null);
+  const lastSpeechTimeRef = useRef<number | null>(null);
+  const speechDetectedRef = useRef(false);
+  const chunkBufferRef = useRef<Blob[]>([]);
+
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
@@ -48,16 +54,21 @@ function App() {
     const mediaRecorder = new MediaRecorder(stream);
     mediaRecorderRef.current = mediaRecorder;
 
-    // 🔥 KEY: continuous chunks every 1 sec
-    mediaRecorder.start(30000);
+    // small chunks
+    mediaRecorder.start(1000);
+
+    chunkStartTimeRef.current = Date.now();
+    lastSpeechTimeRef.current = null;
+    speechDetectedRef.current = false;
+    chunkBufferRef.current = [];
 
     mediaRecorder.ondataavailable = (event) => {
       if (event.data.size > 0) {
-        sendAudioChunk(event.data); // 🔥 send continuously
+        chunkBufferRef.current.push(event.data);
       }
     };
 
-    // 🎧 VAD setup
+    // 🎧 VAD setup (same as before)
     const audioContext = new AudioContext();
     const source = audioContext.createMediaStreamSource(stream);
     const analyser = audioContext.createAnalyser();
@@ -71,6 +82,27 @@ function App() {
     detectSilence();
   };
 
+  const resetChunk = () => {
+    console.log("🔄 Starting new chunk");
+
+    chunkStartTimeRef.current = Date.now();
+    lastSpeechTimeRef.current = null;
+    speechDetectedRef.current = false;
+    chunkBufferRef.current = [];
+  };
+
+  const finalizeChunk = () => {
+    if (chunkBufferRef.current.length === 0) return;
+
+    const blob = new Blob(chunkBufferRef.current, {
+      type: "audio/webm",
+    });
+
+    sendAudioChunk(blob);
+
+    resetChunk();
+  };
+
   // 🚀 VAD (only triggers chunk request, DOES NOT STOP RECORDING)
   const detectSilence = () => {
     const analyser = analyserRef.current;
@@ -78,10 +110,7 @@ function App() {
 
     const dataArray = new Uint8Array(analyser.fftSize);
 
-    // 🔥 NEW STATE VARIABLES
     let smoothedVolume = 0;
-    let isSpeaking = false;
-    let speechStartTime: number | null = null;
 
     const checkVolume = () => {
       analyser.getByteTimeDomainData(dataArray);
@@ -93,51 +122,51 @@ function App() {
       }
 
       const volume = Math.sqrt(sum / dataArray.length);
-
-      // 🔥 SMOOTHING (reduces noise spikes)
       smoothedVolume = 0.8 * smoothedVolume + 0.2 * volume;
 
-      console.log("Raw:", volume, "Smoothed:", smoothedVolume);
-
-      // 🔥 HYSTERESIS THRESHOLDS
       const SPEECH_THRESHOLD = 0.03;
       const SILENCE_THRESHOLD = 0.015;
 
-      // 🔥 TIMING
-      const SILENCE_DURATION = 2000;
-      const MIN_SPEECH_TIME = 300;
-
       const now = Date.now();
 
-      // 🎤 Detect speech start
-      if (!isSpeaking && smoothedVolume > SPEECH_THRESHOLD) {
-        isSpeaking = true;
-        speechStartTime = now;
-        console.log("Speech started");
+      const chunkStart = chunkStartTimeRef.current!;
+      const lastSpeech = lastSpeechTimeRef.current;
+
+      // 🎤 Speech detected
+      if (smoothedVolume > SPEECH_THRESHOLD) {
+        speechDetectedRef.current = true;
+        lastSpeechTimeRef.current = now;
       }
 
-      // 🤫 Detect silence AFTER speech
-      if (isSpeaking && smoothedVolume < SILENCE_THRESHOLD) {
-        const speechDuration = speechStartTime ? now - speechStartTime : 0;
+      // -------------------------------
+      // ✅ RULE 1: MAX 30 sec chunk
+      // -------------------------------
+      if (now - chunkStart >= 30000) {
+        console.log("⏱ Max chunk reached (30s)");
+        finalizeChunk();
+      }
 
-        if (speechDuration > MIN_SPEECH_TIME) {
-          if (!silenceTimerRef.current) {
-            silenceTimerRef.current = window.setTimeout(() => {
-              console.log("Silence detected → forcing chunk");
+      // -------------------------------
+      // ✅ RULE 2: Silence > 5 sec → send
+      // -------------------------------
+      if (
+        speechDetectedRef.current &&
+        lastSpeech &&
+        now - lastSpeech > 5000
+      ) {
+        console.log("🤫 Silence > 5s → finalize chunk");
+        finalizeChunk();
+      }
 
-              mediaRecorderRef.current?.requestData();
-
-              isSpeaking = false;
-              speechStartTime = null;
-            }, SILENCE_DURATION);
-          }
-        }
-      } else {
-        // Reset silence timer if speech resumes
-        if (silenceTimerRef.current) {
-          clearTimeout(silenceTimerRef.current);
-          silenceTimerRef.current = null;
-        }
+      // -------------------------------
+      // ✅ RULE 3: No speech in first 5 sec → discard
+      // -------------------------------
+      if (
+        !speechDetectedRef.current &&
+        now - chunkStart > 5000
+      ) {
+        console.log("🚫 No speech → discard chunk");
+        resetChunk(); // discard
       }
 
       if (isCallingRef.current) {
