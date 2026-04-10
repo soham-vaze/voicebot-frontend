@@ -191,7 +191,7 @@
 //   //   resetChunk();
 //   //   isFinalizingRef.current = false;
 //   // };
-
+  
 //   const finalizeChunk = () => {
 //     console.log("✂️ Requesting chunk flush");
 //     mediaRecorderRef.current?.requestData();
@@ -380,6 +380,10 @@ function App() {
 
   const chatEndRef = useRef<HTMLDivElement | null>(null);
 
+  // Inside your App component
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const sessionIdRef = useRef<string | null>(null); // For immediate access in async loops
+
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
@@ -388,6 +392,10 @@ function App() {
   const startCall = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      
+      const newSessionId = crypto.randomUUID();
+      setSessionId(newSessionId);
+      sessionIdRef.current = newSessionId;
 
       streamRef.current = stream;
       isCallingRef.current = true;
@@ -474,7 +482,7 @@ function App() {
       const now = Date.now();
 
       const SPEECH_THRESHOLD = 0.3;
-      const SILENCE_TIME = 1000; // 🔥 silence duration
+      const SILENCE_TIME = 5000; // 🔥 silence duration
 
       if (smoothedVolume > SPEECH_THRESHOLD) {
         lastSpeechTime = now;
@@ -584,9 +592,13 @@ function App() {
     const formData = new FormData();
     formData.append("file", audioBlob, "chunk.wav");
 
+    if (sessionIdRef.current) {
+      formData.append("sessionId", sessionIdRef.current);
+    }
+
     try {
       const response = await fetch(
-        "http://localhost:5292/api/voice/process",
+        "https://assure-detect-rapidly-jumping.trycloudflare.com/api/voice/process",
         {
           method: "POST",
           body: formData,
@@ -604,7 +616,7 @@ function App() {
       if (data.audioBase64) {
         const audio = new Audio(`data:audio/wav;base64,${data.audioBase64}`);
 
-        setStatus("Speaking");
+        setStatus("Speaking");  
         audio.play();
 
         audio.onended = () => restartListening();
@@ -628,6 +640,9 @@ function App() {
     isCallingRef.current = false;
     setIsCalling(false);
     setStatus("Idle");
+
+    setSessionId(null);
+    sessionIdRef.current = null;
 
     mediaRecorderRef.current?.stop();
     streamRef.current?.getTracks().forEach((t) => t.stop());
